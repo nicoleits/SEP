@@ -10,11 +10,11 @@ using LinearAlgebra
 ################################################################
 # CONFIGURACION DEL PROBLEMA
 ################################################################
-TIPO_CASO_CON_SIN_ER        = 0;
+TIPO_CASO_CON_SIN_ER        = 1;
 # 1: Escoge archivo UC_datEx8.xlsx en donde considera perfil de renovables
-# 0: Escoge archivo UC_datEx8_sinER.xlsx en donde considera perfil de renovables
+# 0: Escoge archivo UC_datEx8_sinER.xlsx en donde no considera perfil de renovables
 TIPO_SOLVER             = 1; # 1 = HiGHS, 2 = Gurobi, 3= Ipopt 
-TIPO_SERIE_ERV          = 9; 
+TIPO_SERIE_ERV          = 4; 
                         #1: WT1 y WT2 perfil 1
                         #2: WT1 y WT2 perfil 2
                         #3: WT1 y WT2 perfil 3
