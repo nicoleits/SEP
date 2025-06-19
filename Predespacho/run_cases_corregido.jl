@@ -31,8 +31,12 @@ function ejecutar_caso(tipo_caso, tipo_solver, tipo_serie)
     println("tipo_serie = $tipo_serie")
     println("="^50)
     
-    # Ejecutar el modelo usando la función encapsulada
+    # Cambiar al directorio Predespacho para encontrar los archivos Excel
+    original_dir = pwd()
     try
+        cd("Predespacho")
+        
+        # Ejecutar el modelo usando la función encapsulada
         resultado = resolver_UC(tipo_caso, tipo_solver, tipo_serie)
         
         # Extraer resultados del diccionario
@@ -273,6 +277,9 @@ function ejecutar_caso(tipo_caso, tipo_solver, tipo_serie)
             println("Este error no es esperado para el caso con energía renovable")
         end
         return nothing
+    finally
+        # Regresar al directorio original
+        cd(original_dir)
     end
 end
 
@@ -310,6 +317,13 @@ end
 
 # Función para generar reporte comparativo
 function generar_reporte_comparativo(resultados)
+    # Verificar si hay resultados exitosos
+    if isempty(resultados)
+        println("⚠️  No hay resultados exitosos para generar el reporte comparativo")
+        println("   Verifique que los archivos Excel estén disponibles y el modelo funcione correctamente")
+        return nothing
+    end
+    
     # Crear DataFrame con resumen detallado
     casos = []
     costos = []
@@ -555,6 +569,261 @@ function generar_reporte_comparativo(resultados)
             sheet["D$fila"] = horas_con_vertimiento
             sheet["E$fila"] = horas_sin_vertimiento
         end
+        
+        # Agregar hoja con análisis del commitment (estado de encendido/apagado)
+        XLSX.addsheet!(xf, "Analisis_Commitment")
+        sheet = xf["Analisis_Commitment"]
+        sheet["A1"] = "Análisis del Commitment de Unidades"
+        sheet["A3"] = "Caso"
+        sheet["B3"] = "Central"
+        sheet["C3"] = "Tipo"
+        sheet["D3"] = "Horas Encendida"
+        sheet["E3"] = "Horas Apagada"
+        sheet["F3"] = "Factor de Utilización (%)"
+        sheet["G3"] = "Horas de Arranque"
+        sheet["H3"] = "Horas de Parada"
+        
+        fila_actual = 4
+        for (nombre, resultado) in resultados
+            ug_sol = resultado[4]  # Estado de encendido
+            datGen = resultado[8]
+            tipoGen = datGen[:,11]
+            ng = size(ug_sol, 1)
+            nT = size(ug_sol, 2)
+            
+            # Calcular estadísticas de commitment para cada central
+            for i in 1:ng
+                horas_encendida = sum(ug_sol[i,:])
+                horas_apagada = nT - horas_encendida
+                factor_utilizacion = (horas_encendida / nT) * 100
+                
+                # Calcular número de arranques y paradas
+                arranques = 0
+                paradas = 0
+                for t in 2:nT
+                    if ug_sol[i,t] > 0.5 && ug_sol[i,t-1] < 0.5  # Arranque
+                        arranques += 1
+                    elseif ug_sol[i,t] < 0.5 && ug_sol[i,t-1] > 0.5  # Parada
+                        paradas += 1
+                    end
+                end
+                
+                sheet["A$fila_actual"] = nombre
+                sheet["B$fila_actual"] = "Central $i"
+                if tipoGen[i] == 1
+                    sheet["C$fila_actual"] = "Térmica"
+                elseif tipoGen[i] == 2
+                    sheet["C$fila_actual"] = "Renovable"
+                end
+                sheet["D$fila_actual"] = horas_encendida
+                sheet["E$fila_actual"] = horas_apagada
+                sheet["F$fila_actual"] = round(factor_utilizacion, digits=2)
+                sheet["G$fila_actual"] = arranques
+                sheet["H$fila_actual"] = paradas
+                
+                fila_actual += 1
+            end
+        end
+        
+        # Agregar hoja con commitment por hora
+        XLSX.addsheet!(xf, "Commitment_Por_Hora")
+        sheet = xf["Commitment_Por_Hora"]
+        sheet["A1"] = "Estado de Commitment por Hora"
+        sheet["A3"] = "Hora"
+        
+        # Encabezados de casos
+        for (i, (nombre, _)) in enumerate(resultados)
+            col = Char(Int('B') + i - 1)
+            sheet["$(col)3"] = nombre
+        end
+        
+        # Datos por hora - número total de unidades encendidas
+        for hora in 1:24
+            fila = hora + 3
+            sheet["A$fila"] = hora
+            
+            for (i, (nombre, resultado)) in enumerate(resultados)
+                col = Char(Int('B') + i - 1)
+                ug_sol = resultado[4]
+                if size(ug_sol, 2) >= hora
+                    unidades_encendidas = sum(ug_sol[:, hora])
+                    sheet["$(col)$fila"] = unidades_encendidas
+                else
+                    sheet["$(col)$fila"] = 0.0
+                end
+            end
+        end
+        
+        # Agregar hoja con análisis de líneas congestionadas
+        XLSX.addsheet!(xf, "Analisis_Líneas_Congestionadas")
+        sheet = xf["Analisis_Líneas_Congestionadas"]
+        sheet["A1"] = "Análisis de Líneas Congestionadas"
+        sheet["A3"] = "Caso"
+        sheet["B3"] = "Línea"
+        sheet["C3"] = "Desde"
+        sheet["D3"] = "Hasta"
+        sheet["E3"] = "Capacidad Máxima (MW)"
+        sheet["F3"] = "Flujo Máximo (MW)"
+        sheet["G3"] = "Factor de Carga (%)"
+        sheet["H3"] = "Horas Congestionada"
+        sheet["I3"] = "Horas al Límite (>95%)"
+        
+        fila_actual = 4
+        for (nombre, resultado) in resultados
+            fij_sol = resultado[5]  # Flujos en líneas
+            
+            # Cambiar al directorio Predespacho para leer los datos de líneas
+            original_dir = pwd()
+            datLineas = nothing
+            try
+                cd("Predespacho")
+                datLineas = XLSX.readdata("UC_datEx8.xlsx", "Lineas!A4:G14")
+                if datLineas === nothing || isempty(datLineas)
+                    error("No se pudieron leer los datos de líneas del archivo UC_datEx8.xlsx")
+                end
+            catch e
+                println("Error al leer datos de líneas: ", e)
+                # Intentar con el archivo sin ER si el principal falla
+                try
+                    datLineas = XLSX.readdata("UC_datEx8_sinER.xlsx", "Lineas!A4:G14")
+                catch e2
+                    println("Error al leer datos de líneas del archivo sin ER: ", e2)
+                    error("No se pudieron leer los datos de líneas de ningún archivo")
+                end
+            finally
+                cd(original_dir)
+            end
+            
+            Tmax = datLineas[:,5]  # Capacidad máxima
+            fromTx = datLineas[:,2]  # Barra origen
+            toTx = datLineas[:,3]    # Barra destino
+            nTx = length(Tmax)
+            nT = size(fij_sol, 2)
+            
+            # Analizar cada línea
+            for i in 1:nTx
+                flujo_maximo = maximum(abs.(fij_sol[i,:]))
+                factor_carga = (flujo_maximo / Tmax[i]) * 100
+                horas_congestionada = count(t -> abs(fij_sol[i,t]) >= Tmax[i] * 0.99, 1:nT)
+                horas_al_limite = count(t -> abs(fij_sol[i,t]) >= Tmax[i] * 0.95, 1:nT)
+                
+                sheet["A$fila_actual"] = nombre
+                sheet["B$fila_actual"] = "Línea $i"
+                sheet["C$fila_actual"] = fromTx[i]
+                sheet["D$fila_actual"] = toTx[i]
+                sheet["E$fila_actual"] = Tmax[i]
+                sheet["F$fila_actual"] = round(flujo_maximo, digits=2)
+                sheet["G$fila_actual"] = round(factor_carga, digits=2)
+                sheet["H$fila_actual"] = horas_congestionada
+                sheet["I$fila_actual"] = horas_al_limite
+                
+                fila_actual += 1
+            end
+        end
+        
+        # Agregar hoja con flujos por hora
+        XLSX.addsheet!(xf, "Flujos_Por_Hora")
+        sheet = xf["Flujos_Por_Hora"]
+        sheet["A1"] = "Flujos en Líneas por Hora"
+        sheet["A3"] = "Hora"
+        
+        # Encabezados de casos
+        for (i, (nombre, _)) in enumerate(resultados)
+            col = Char(Int('B') + i - 1)
+            sheet["$(col)3"] = nombre
+        end
+        
+        # Datos por hora - flujo total en el sistema
+        for hora in 1:24
+            fila = hora + 3
+            sheet["A$fila"] = hora
+            
+            for (i, (nombre, resultado)) in enumerate(resultados)
+                col = Char(Int('B') + i - 1)
+                fij_sol = resultado[5]
+                if size(fij_sol, 2) >= hora
+                    flujo_total = sum(abs.(fij_sol[:, hora]))
+                    sheet["$(col)$fila"] = round(flujo_total, digits=2)
+                else
+                    sheet["$(col)$fila"] = 0.0
+                end
+            end
+        end
+        
+        # Agregar hoja con resumen de congestión por caso
+        XLSX.addsheet!(xf, "Resumen_Congestion")
+        sheet = xf["Resumen_Congestion"]
+        sheet["A1"] = "Resumen de Congestión por Caso"
+        sheet["A3"] = "Caso"
+        sheet["B3"] = "Líneas Congestionadas"
+        sheet["C3"] = "Líneas al Límite (>95%)"
+        sheet["D3"] = "Total de Líneas"
+        sheet["E3"] = "Factor de Congestión (%)"
+        sheet["F3"] = "Flujo Promedio (MW)"
+        sheet["G3"] = "Flujo Máximo (MW)"
+        
+        for (i, (nombre, resultado)) in enumerate(resultados)
+            fila = i + 3
+            fij_sol = resultado[5]
+            
+            # Cambiar al directorio Predespacho para leer los datos de líneas
+            original_dir = pwd()
+            datLineas = nothing
+            try
+                cd("Predespacho")
+                datLineas = XLSX.readdata("UC_datEx8.xlsx", "Lineas!A4:G14")
+                if datLineas === nothing || isempty(datLineas)
+                    error("No se pudieron leer los datos de líneas del archivo UC_datEx8.xlsx")
+                end
+            catch e
+                println("Error al leer datos de líneas: ", e)
+                # Intentar con el archivo sin ER si el principal falla
+                try
+                    datLineas = XLSX.readdata("UC_datEx8_sinER.xlsx", "Lineas!A4:G14")
+                catch e2
+                    println("Error al leer datos de líneas del archivo sin ER: ", e2)
+                    error("No se pudieron leer los datos de líneas de ningún archivo")
+                end
+            finally
+                cd(original_dir)
+            end
+            
+            Tmax = datLineas[:,5]
+            nTx = length(Tmax)
+            nT = size(fij_sol, 2)
+            
+            # Calcular estadísticas de congestión
+            lineas_congestionadas = 0
+            lineas_al_limite = 0
+            flujo_promedio = 0
+            flujo_maximo = 0
+            
+            for j in 1:nTx
+                flujo_max_linea = maximum(abs.(fij_sol[j,:]))
+                flujo_prom_linea = mean(abs.(fij_sol[j,:]))
+                
+                if flujo_max_linea >= Tmax[j] * 0.99
+                    lineas_congestionadas += 1
+                end
+                if flujo_max_linea >= Tmax[j] * 0.95
+                    lineas_al_limite += 1
+                end
+                
+                flujo_promedio += flujo_prom_linea
+                flujo_maximo = max(flujo_maximo, flujo_max_linea)
+            end
+            
+            flujo_promedio /= nTx
+            factor_congestion = (lineas_congestionadas / nTx) * 100
+            
+            sheet["A$fila"] = nombre
+            sheet["B$fila"] = lineas_congestionadas
+            sheet["C$fila"] = lineas_al_limite
+            sheet["D$fila"] = nTx
+            sheet["E$fila"] = round(factor_congestion, digits=2)
+            sheet["F$fila"] = round(flujo_promedio, digits=2)
+            sheet["G$fila"] = round(flujo_maximo, digits=2)
+        end
     end
     
     println("📊 Reporte comparativo detallado guardado en 'reporte_comparativo_casos.xlsx'")
@@ -564,6 +833,11 @@ function generar_reporte_comparativo(resultados)
     println("   - Potencia_Por_Hora: Potencia generada detallada por hora")
     println("   - Costos_Marginales_Por_Hora: Costos marginales por hora")
     println("   - Analisis_Vertimiento: Resumen de vertimiento")
+    println("   - Analisis_Commitment: Análisis del commitment de unidades")
+    println("   - Commitment_Por_Hora: Estado de commitment por hora")
+    println("   - Analisis_Líneas_Congestionadas: Análisis detallado de líneas")
+    println("   - Flujos_Por_Hora: Flujos en líneas por hora")
+    println("   - Resumen_Congestion: Resumen de congestión por caso")
     
     # Crear gráficos comparativos
     p1 = plot(df.Caso, df.Costo_Total, 
@@ -590,6 +864,96 @@ function generar_reporte_comparativo(resultados)
     savefig(p1, "comparacion_costos_casos.png")
     savefig(p2, "comparacion_vertimiento_casos.png")
     savefig(p3, "comparacion_beneficios_casos.png")
+    
+    # Crear gráficos adicionales para commitment y congestión
+    # Gráfico de factor de utilización promedio por caso
+    if haskey(resultados, "Base")
+        casos_commitment = []
+        factor_utilizacion_promedio = []
+        
+        for (nombre, resultado) in resultados
+            ug_sol = resultado[4]
+            ng = size(ug_sol, 1)
+            nT = size(ug_sol, 2)
+            
+            # Calcular factor de utilización promedio de todas las unidades
+            factor_total = 0
+            for i in 1:ng
+                horas_encendida = sum(ug_sol[i,:])
+                factor_total += (horas_encendida / nT) * 100
+            end
+            factor_promedio = factor_total / ng
+            
+            push!(casos_commitment, nombre)
+            push!(factor_utilizacion_promedio, factor_promedio)
+        end
+        
+        p4 = plot(casos_commitment, factor_utilizacion_promedio,
+            title="Factor de Utilización Promedio por Caso",
+            xlabel="Caso",
+            ylabel="Factor de Utilización (%)",
+            seriestype=:bar,
+            legend=false)
+        savefig(p4, "factor_utilizacion_casos.png")
+        
+        # Gráfico de líneas congestionadas por caso
+        casos_congestion = []
+        lineas_congestionadas = []
+        
+        for (nombre, resultado) in resultados
+            fij_sol = resultado[5]
+            
+            # Cambiar al directorio Predespacho para leer los datos de líneas
+            original_dir = pwd()
+            datLineas = nothing
+            try
+                cd("Predespacho")
+                datLineas = XLSX.readdata("UC_datEx8.xlsx", "Lineas!A4:G14")
+                if datLineas === nothing || isempty(datLineas)
+                    error("No se pudieron leer los datos de líneas del archivo UC_datEx8.xlsx")
+                end
+            catch e
+                println("Error al leer datos de líneas: ", e)
+                # Intentar con el archivo sin ER si el principal falla
+                try
+                    datLineas = XLSX.readdata("UC_datEx8_sinER.xlsx", "Lineas!A4:G14")
+                catch e2
+                    println("Error al leer datos de líneas del archivo sin ER: ", e2)
+                    error("No se pudieron leer los datos de líneas de ningún archivo")
+                end
+            finally
+                cd(original_dir)
+            end
+            
+            Tmax = datLineas[:,5]
+            nTx = length(Tmax)
+            nT = size(fij_sol, 2)
+            
+            # Contar líneas congestionadas
+            lineas_cong = 0
+            for j in 1:nTx
+                flujo_max_linea = maximum(abs.(fij_sol[j,:]))
+                if flujo_max_linea >= Tmax[j] * 0.99
+                    lineas_cong += 1
+                end
+            end
+            
+            push!(casos_congestion, nombre)
+            push!(lineas_congestionadas, lineas_cong)
+        end
+        
+        p5 = plot(casos_congestion, lineas_congestionadas,
+            title="Líneas Congestionadas por Caso",
+            xlabel="Caso",
+            ylabel="Número de Líneas Congestionadas",
+            seriestype=:bar,
+            legend=false)
+        savefig(p5, "lineas_congestionadas_casos.png")
+        
+        println("📈 Gráficos adicionales guardados:")
+        println("   - factor_utilizacion_casos.png")
+        println("   - lineas_congestionadas_casos.png")
+    end
     
     println("📈 Gráficos comparativos guardados:")
     println("   - comparacion_costos_casos.png")
